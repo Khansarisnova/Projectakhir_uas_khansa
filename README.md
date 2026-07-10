@@ -1,2 +1,0 @@
-# Projectakhir_uas_khansa
-Projectakhiruas

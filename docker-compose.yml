@@ -1,0 +1,243 @@
+networks:
+  campus-health-net:
+    driver: bridge
+
+volumes:
+  postgres_auth_data:
+  postgres_health_data:
+  postgres_notif_data:
+  activemq_data:
+
+services:
+  # ─────────────────────────────────────────────
+  # DATABASES (isolated per service)
+  # ─────────────────────────────────────────────
+  postgres-auth:
+    image: postgres:15-alpine
+    container_name: postgres-auth
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: auth_user
+      POSTGRES_PASSWORD: auth_pass123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_auth_data:/var/lib/postgresql/data
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres-health:
+    image: postgres:15-alpine
+    container_name: postgres-health
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: health_db
+      POSTGRES_USER: health_user
+      POSTGRES_PASSWORD: health_pass123
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_health_data:/var/lib/postgresql/data
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U health_user -d health_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres-notif:
+    image: postgres:15-alpine
+    container_name: postgres-notif
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: notif_db
+      POSTGRES_USER: notif_user
+      POSTGRES_PASSWORD: notif_pass123
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_notif_data:/var/lib/postgresql/data
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notif_user -d notif_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # MESSAGE BROKER — Apache ActiveMQ
+  # ─────────────────────────────────────────────
+  activemq:
+    image: apache/activemq-classic:5.18.3
+    container_name: activemq
+    restart: unless-stopped
+    ports:
+      - "61616:61616"   # STOMP / OpenWire
+      - "8161:8161"     # Web Console (admin/admin)
+      - "61613:61613"   # STOMP protocol
+    volumes:
+      - activemq_data:/opt/activemq/data
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8161/admin/ -u admin:admin || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ─────────────────────────────────────────────
+  # AUTH SERVICE (Port 3001)
+  # ─────────────────────────────────────────────
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: auth-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DB_HOST: postgres-auth
+      DB_PORT: 5432
+      DB_NAME: auth_db
+      DB_USER: auth_user
+      DB_PASS: auth_pass123
+      JWT_SECRET: kampus_sehat_jwt_secret_key_2024_xYz!@#
+      JWT_EXPIRES_IN: 24h
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres-auth:
+        condition: service_healthy
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ─────────────────────────────────────────────
+  # HEALTH SERVICE / BUSINESS LOGIC (Port 3002)
+  # ─────────────────────────────────────────────
+  health-service:
+    build:
+      context: ./health-service
+      dockerfile: Dockerfile
+    container_name: health-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      DB_HOST: postgres-health
+      DB_PORT: 5432
+      DB_NAME: health_db
+      DB_USER: health_user
+      DB_PASS: health_pass123
+      ACTIVEMQ_HOST: activemq
+      ACTIVEMQ_PORT: 61613
+      ACTIVEMQ_USER: admin
+      ACTIVEMQ_PASS: admin
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres-health:
+        condition: service_healthy
+      activemq:
+        condition: service_healthy
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3002/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─────────────────────────────────────────────
+  # NOTIFICATION SERVICE (Port 3003)
+  # ─────────────────────────────────────────────
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    container_name: notification-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3003
+      DB_HOST: postgres-notif
+      DB_PORT: 5432
+      DB_NAME: notif_db
+      DB_USER: notif_user
+      DB_PASS: notif_pass123
+      ACTIVEMQ_HOST: activemq
+      ACTIVEMQ_PORT: 61613
+      ACTIVEMQ_USER: admin
+      ACTIVEMQ_PASS: admin
+      SMTP_HOST: smtp.mailtrap.io
+      SMTP_PORT: 2525
+      SMTP_USER: mailtrap_user
+      SMTP_PASS: mailtrap_pass
+      FROM_EMAIL: noreply@kampussehat.ac.id
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres-notif:
+        condition: service_healthy
+      activemq:
+        condition: service_healthy
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3003/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─────────────────────────────────────────────
+  # API GATEWAY (Port 3000)
+  # ─────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      JWT_SECRET: kampus_sehat_jwt_secret_key_2024_xYz!@#
+      AUTH_SERVICE_URL: http://auth-service:3001
+      HEALTH_SERVICE_URL: http://health-service:3002
+      NOTIFICATION_SERVICE_URL: http://notification-service:3003
+      RATE_LIMIT_WINDOW_MS: 60000
+      RATE_LIMIT_MAX: 100
+    ports:
+      - "3000:3000"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      health-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    networks:
+      - campus-health-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
